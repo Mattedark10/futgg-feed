@@ -1,0 +1,78 @@
+name: FUT.GG Monitor
+
+# Il job resta acceso circa 5 ore e 40 minuti e controlla FUT.GG
+# ogni 5 minuti. Alla fine rilancia se stesso, quindi non serve
+# nessun servizio esterno (niente Netlify, niente cron-job.org).
+# Il cron orario è solo una rete di sicurezza: se la catena si
+# interrompe, riparte da solo entro un'ora.
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: futgg-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Scarica repository
+        uses: actions/checkout@v4
+
+      - name: Installa Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installa librerie
+        run: pip install -r requirements.txt
+
+      - name: Controlla FUT.GG ogni 5 minuti
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          git config user.name "FUT.GG Monitor"
+          git config user.email "actions@github.com"
+
+          save_data() {
+            git add players.json docs/trending.json docs/price_history.json docs/sales_history.json 2>/dev/null || true
+            if git diff --cached --quiet; then
+              return
+            fi
+            git commit -q -m "Update FutFlex data"
+            if ! git pull -q --rebase origin main; then
+              git rebase --abort || true
+              return
+            fi
+            git push -q origin HEAD:main || true
+          }
+
+          END=20400   # 340 minuti
+          while [ "$SECONDS" -lt "$END" ]; do
+            START=$SECONDS
+
+            python monitor.py  || echo "monitor.py è andato in errore"
+            python trending.py || echo "trending.py è andato in errore"
+            save_data
+
+            WAIT=$((300 - (SECONDS - START)))
+            if [ "$WAIT" -gt 0 ]; then
+              sleep "$WAIT"
+            fi
+          done
+
+      - name: Rilancia il monitor
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run monitor.yml --repo "${{ github.repository }}" --ref main
